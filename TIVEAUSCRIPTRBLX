@@ -1,0 +1,642 @@
+-- TIVEAU FLY + NOCLIP (interface moderne)
+-- À mettre dans StarterPlayer > StarterPlayerScripts (LocalScript)
+-- Touches : F = fly | N = noclip | M = afficher/cacher le menu
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local Player = Players.LocalPlayer
+local PlayerGui = Player:WaitForChild("PlayerGui")
+
+-- Nettoie l'ancienne version si le script est relancé
+if _G.TiveauFlyUnload then
+	pcall(_G.TiveauFlyUnload)
+end
+
+local MIN_SPEED, MAX_SPEED = 10, 250
+local flySpeed = 60
+local flying, noclip = false, false
+
+local flyConnection, noclipConnection
+local bodyVelocity, bodyGyro
+local originalCollide = {}
+local connections = {}
+
+local function addConn(c)
+	connections[#connections + 1] = c
+	return c
+end
+
+---------------------------------------------------------------------
+-- THÈME + OUTILS UI
+---------------------------------------------------------------------
+local THEME = {
+	bg = Color3.fromRGB(17, 19, 27),
+	card = Color3.fromRGB(26, 29, 41),
+	cardHover = Color3.fromRGB(38, 42, 58),
+	stroke = Color3.fromRGB(52, 57, 80),
+	text = Color3.fromRGB(235, 238, 248),
+	sub = Color3.fromRGB(135, 142, 168),
+	accent = Color3.fromRGB(99, 102, 241),
+	accent2 = Color3.fromRGB(56, 189, 248),
+	off = Color3.fromRGB(55, 60, 82),
+	danger = Color3.fromRGB(239, 68, 68),
+}
+local WHITE = Color3.new(1, 1, 1)
+
+local function new(class, props, parent)
+	local o = Instance.new(class)
+	for k, v in pairs(props or {}) do
+		o[k] = v
+	end
+	o.Parent = parent
+	return o
+end
+
+local function corner(o, r)
+	return new("UICorner", { CornerRadius = UDim.new(0, r or 10) }, o)
+end
+
+local function stroke(o, color, thickness, transparency)
+	return new("UIStroke", {
+		Color = color or THEME.stroke,
+		Thickness = thickness or 1,
+		Transparency = transparency or 0,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+	}, o)
+end
+
+local function tween(o, t, props)
+	TweenService:Create(o, TweenInfo.new(t, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
+end
+
+local function accentGradient(o, rotation)
+	return new("UIGradient", {
+		Color = ColorSequence.new(THEME.accent, THEME.accent2),
+		Rotation = rotation or 0,
+	}, o)
+end
+
+local orderCounter = 0
+local function nextOrder()
+	orderCounter += 1
+	return orderCounter
+end
+
+---------------------------------------------------------------------
+-- FENÊTRE
+---------------------------------------------------------------------
+local oldGui = PlayerGui:FindFirstChild("TiveauFlyMenu")
+if oldGui then
+	oldGui:Destroy()
+end
+
+local Gui = new("ScreenGui", {
+	Name = "TiveauFlyMenu",
+	ResetOnSpawn = false,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, PlayerGui)
+
+local FULL_SIZE = UDim2.fromOffset(290, 272)
+local MINI_SIZE = UDim2.fromOffset(290, 48)
+
+local Frame = new("Frame", {
+	Size = FULL_SIZE,
+	Position = UDim2.new(0, 24, 0.5, -136),
+	BackgroundColor3 = THEME.bg,
+	BorderSizePixel = 0,
+	ClipsDescendants = true,
+}, Gui)
+corner(Frame, 16)
+stroke(Frame, THEME.stroke, 1, 0.1)
+local Scale = new("UIScale", { Scale = 1 }, Frame)
+
+local accentLine = new("Frame", {
+	Size = UDim2.new(1, 0, 0, 3),
+	BackgroundColor3 = WHITE,
+	BorderSizePixel = 0,
+	ZIndex = 3,
+}, Frame)
+accentGradient(accentLine)
+
+-- En-tête (sert aussi à déplacer la fenêtre)
+local Header = new("Frame", {
+	Size = UDim2.new(1, 0, 0, 48),
+	BackgroundTransparency = 1,
+	Active = true,
+}, Frame)
+
+new("TextLabel", {
+	Size = UDim2.new(1, -90, 0, 22),
+	Position = UDim2.fromOffset(16, 8),
+	BackgroundTransparency = 1,
+	Text = "TIVEAU",
+	TextColor3 = THEME.text,
+	Font = Enum.Font.GothamBlack,
+	TextSize = 17,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, Header)
+
+new("TextLabel", {
+	Size = UDim2.new(1, -90, 0, 14),
+	Position = UDim2.fromOffset(16, 28),
+	BackgroundTransparency = 1,
+	Text = "Fly & Noclip",
+	TextColor3 = THEME.sub,
+	Font = Enum.Font.GothamMedium,
+	TextSize = 12,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, Header)
+
+local function headerButton(text, xOffset, hoverColor)
+	local b = new("TextButton", {
+		Size = UDim2.fromOffset(28, 28),
+		Position = UDim2.new(1, xOffset, 0, 12),
+		BackgroundColor3 = THEME.card,
+		Text = text,
+		TextColor3 = THEME.sub,
+		Font = Enum.Font.GothamBold,
+		TextSize = 15,
+		AutoButtonColor = false,
+	}, Header)
+	corner(b, 8)
+	b.MouseEnter:Connect(function()
+		tween(b, 0.12, { BackgroundColor3 = hoverColor, TextColor3 = WHITE })
+	end)
+	b.MouseLeave:Connect(function()
+		tween(b, 0.12, { BackgroundColor3 = THEME.card, TextColor3 = THEME.sub })
+	end)
+	return b
+end
+
+local minBtn = headerButton("–", -72, THEME.cardHover)
+local closeBtn = headerButton("✕", -38, THEME.danger)
+
+-- Corps
+local Body = new("Frame", {
+	Size = UDim2.new(1, 0, 1, -52),
+	Position = UDim2.fromOffset(0, 52),
+	BackgroundTransparency = 1,
+}, Frame)
+new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, Body)
+new("UIPadding", { PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14) }, Body)
+
+local function card(height)
+	local f = new("Frame", {
+		Size = UDim2.new(1, 0, 0, height),
+		BackgroundColor3 = THEME.card,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(),
+	}, Body)
+	corner(f, 12)
+	stroke(f, THEME.stroke, 1, 0.5)
+	return f
+end
+
+---------------------------------------------------------------------
+-- INTERRUPTEURS
+---------------------------------------------------------------------
+local function createToggle(label, hint, callback)
+	local row = card(46)
+
+	new("TextLabel", {
+		Size = UDim2.new(1, -80, 0, 20),
+		Position = UDim2.fromOffset(14, 5),
+		BackgroundTransparency = 1,
+		Text = label,
+		TextColor3 = THEME.text,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+
+	new("TextLabel", {
+		Size = UDim2.new(1, -80, 0, 14),
+		Position = UDim2.fromOffset(14, 25),
+		BackgroundTransparency = 1,
+		Text = hint,
+		TextColor3 = THEME.sub,
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+
+	local track = new("Frame", {
+		Size = UDim2.fromOffset(44, 24),
+		Position = UDim2.new(1, -58, 0.5, -12),
+		BackgroundColor3 = THEME.off,
+		BorderSizePixel = 0,
+	}, row)
+	corner(track, 12)
+
+	local knob = new("Frame", {
+		Size = UDim2.fromOffset(18, 18),
+		Position = UDim2.fromOffset(3, 3),
+		BackgroundColor3 = WHITE,
+		BorderSizePixel = 0,
+	}, track)
+	corner(knob, 9)
+
+	local click = new("TextButton", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Text = "",
+	}, row)
+
+	local on = false
+	local obj = {}
+
+	function obj.Set(value, silent)
+		on = value and true or false
+		tween(track, 0.18, { BackgroundColor3 = on and THEME.accent or THEME.off })
+		tween(knob, 0.18, { Position = on and UDim2.fromOffset(23, 3) or UDim2.fromOffset(3, 3) })
+		if not silent then
+			callback(on)
+		end
+	end
+
+	function obj.Get()
+		return on
+	end
+
+	click.MouseButton1Click:Connect(function()
+		obj.Set(not on)
+	end)
+
+	return obj
+end
+
+-- Fonctions définies plus bas
+local startFly, stopFly, setNoclip
+
+local flyToggle = createToggle("Fly", "Touche F  •  WASD + Espace / Ctrl", function(on)
+	if on then
+		startFly()
+	else
+		stopFly()
+	end
+end)
+
+local noclipToggle = createToggle("Noclip", "Touche N  •  traverse les murs", function(on)
+	setNoclip(on)
+end)
+
+---------------------------------------------------------------------
+-- SLIDER DE VITESSE
+---------------------------------------------------------------------
+local sliderCard = card(66)
+
+new("TextLabel", {
+	Size = UDim2.new(0.6, 0, 0, 20),
+	Position = UDim2.fromOffset(14, 8),
+	BackgroundTransparency = 1,
+	Text = "Vitesse de vol",
+	TextColor3 = THEME.text,
+	Font = Enum.Font.GothamBold,
+	TextSize = 14,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, sliderCard)
+
+local valueLabel = new("TextLabel", {
+	Size = UDim2.new(0.4, 0, 0, 20),
+	Position = UDim2.new(0.6, -14, 0, 8),
+	BackgroundTransparency = 1,
+	Text = "",
+	TextColor3 = THEME.accent2,
+	Font = Enum.Font.GothamBold,
+	TextSize = 14,
+	TextXAlignment = Enum.TextXAlignment.Right,
+}, sliderCard)
+
+local track = new("Frame", {
+	Size = UDim2.new(1, -28, 0, 6),
+	Position = UDim2.new(0, 14, 0, 44),
+	BackgroundColor3 = THEME.off,
+	BorderSizePixel = 0,
+}, sliderCard)
+corner(track, 3)
+
+local fill = new("Frame", {
+	Size = UDim2.fromScale(0, 1),
+	BackgroundColor3 = WHITE,
+	BorderSizePixel = 0,
+}, track)
+corner(fill, 3)
+accentGradient(fill)
+
+local sliderKnob = new("Frame", {
+	Size = UDim2.fromOffset(16, 16),
+	BackgroundColor3 = WHITE,
+	BorderSizePixel = 0,
+	ZIndex = 2,
+}, track)
+corner(sliderKnob, 8)
+stroke(sliderKnob, THEME.accent, 2)
+
+local hit = new("TextButton", {
+	Size = UDim2.new(1, -28, 0, 28),
+	Position = UDim2.new(0, 14, 0, 33),
+	BackgroundTransparency = 1,
+	Text = "",
+}, sliderCard)
+
+local function setSpeed(value)
+	flySpeed = math.clamp(math.floor(value + 0.5), MIN_SPEED, MAX_SPEED)
+	local rel = (flySpeed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED)
+	fill.Size = UDim2.fromScale(rel, 1)
+	sliderKnob.Position = UDim2.new(rel, -8, 0.5, -8)
+	valueLabel.Text = tostring(flySpeed)
+end
+setSpeed(flySpeed)
+
+local function speedFromX(x)
+	local rel = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+	setSpeed(MIN_SPEED + (MAX_SPEED - MIN_SPEED) * rel)
+end
+
+local sliding = false
+hit.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		sliding = true
+		speedFromX(input.Position.X)
+	end
+end)
+
+-- Pied de page
+new("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 18),
+	BackgroundTransparency = 1,
+	Text = "F fly   •   N noclip   •   M menu",
+	TextColor3 = THEME.sub,
+	Font = Enum.Font.Gotham,
+	TextSize = 11,
+	LayoutOrder = nextOrder(),
+}, Body)
+
+---------------------------------------------------------------------
+-- DÉPLACEMENT DE LA FENÊTRE
+---------------------------------------------------------------------
+local dragging, dragStart, startPos
+Header.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragStart = input.Position
+		startPos = Frame.Position
+	end
+end)
+
+addConn(UserInputService.InputChanged:Connect(function(input)
+	local moving = input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.Touch
+	if not moving then return end
+
+	if dragging then
+		local d = input.Position - dragStart
+		Frame.Position = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + d.X,
+			startPos.Y.Scale, startPos.Y.Offset + d.Y
+		)
+	end
+	if sliding then
+		speedFromX(input.Position.X)
+	end
+end))
+
+addConn(UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = false
+		sliding = false
+	end
+end))
+
+---------------------------------------------------------------------
+-- RÉDUIRE / CACHER / BOUTON FLOTTANT
+---------------------------------------------------------------------
+local FloatBtn = new("TextButton", {
+	Size = UDim2.fromOffset(44, 44),
+	Position = UDim2.new(0, 16, 0.5, -22),
+	BackgroundColor3 = THEME.bg,
+	Text = "✈",
+	TextColor3 = WHITE,
+	Font = Enum.Font.GothamBold,
+	TextSize = 20,
+	AutoButtonColor = false,
+	Visible = false,
+}, Gui)
+corner(FloatBtn, 22)
+stroke(FloatBtn, THEME.accent, 2)
+
+local function setMenuVisible(visible)
+	if visible then
+		Frame.Visible = true
+		FloatBtn.Visible = false
+		Scale.Scale = 0.92
+		tween(Scale, 0.18, { Scale = 1 })
+	else
+		Frame.Visible = false
+		FloatBtn.Visible = true
+	end
+end
+
+local minimized = false
+minBtn.MouseButton1Click:Connect(function()
+	minimized = not minimized
+	minBtn.Text = minimized and "+" or "–"
+	if minimized then
+		Body.Visible = false
+		tween(Frame, 0.2, { Size = MINI_SIZE })
+	else
+		Body.Visible = true
+		tween(Frame, 0.2, { Size = FULL_SIZE })
+	end
+end)
+
+closeBtn.MouseButton1Click:Connect(function()
+	setMenuVisible(false)
+end)
+FloatBtn.MouseButton1Click:Connect(function()
+	setMenuVisible(true)
+end)
+
+---------------------------------------------------------------------
+-- OUTILS PERSONNAGE
+---------------------------------------------------------------------
+local function getHumanoid()
+	local character = Player.Character
+	return character and character:FindFirstChildOfClass("Humanoid")
+end
+
+local function getRoot()
+	local character = Player.Character
+	return character and character:FindFirstChild("HumanoidRootPart")
+end
+
+local function getMoveDirection()
+	local cf = workspace.CurrentCamera.CFrame
+	local move = Vector3.zero
+
+	if not UserInputService:GetFocusedTextBox() then
+		if UserInputService:IsKeyDown(Enum.KeyCode.W) then move += cf.LookVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.S) then move -= cf.LookVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.D) then move += cf.RightVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.A) then move -= cf.RightVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.Space) or UserInputService:IsKeyDown(Enum.KeyCode.E) then
+			move += Vector3.yAxis
+		end
+		if UserInputService:IsKeyDown(Enum.KeyCode.Q) or UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+			move -= Vector3.yAxis
+		end
+	end
+
+	-- Support mobile / manette
+	local humanoid = getHumanoid()
+	if move.Magnitude == 0 and humanoid and humanoid.MoveDirection.Magnitude > 0 then
+		local flat = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
+		local right = Vector3.new(cf.RightVector.X, 0, cf.RightVector.Z)
+		if flat.Magnitude > 0.01 and right.Magnitude > 0.01 then
+			local md = humanoid.MoveDirection
+			move = cf.LookVector * md:Dot(flat.Unit) + cf.RightVector * md:Dot(right.Unit)
+		else
+			move = humanoid.MoveDirection
+		end
+	end
+
+	return move
+end
+
+---------------------------------------------------------------------
+-- FLY
+---------------------------------------------------------------------
+stopFly = function()
+	flying = false
+
+	if flyConnection then
+		flyConnection:Disconnect()
+		flyConnection = nil
+	end
+	if bodyVelocity then
+		bodyVelocity:Destroy()
+		bodyVelocity = nil
+	end
+	if bodyGyro then
+		bodyGyro:Destroy()
+		bodyGyro = nil
+	end
+
+	local humanoid = getHumanoid()
+	if humanoid then
+		humanoid.PlatformStand = false
+	end
+
+	flyToggle.Set(false, true)
+end
+
+startFly = function()
+	local humanoid = getHumanoid()
+	local root = getRoot()
+	if not humanoid or not root then
+		flyToggle.Set(false, true)
+		return
+	end
+
+	flying = true
+	humanoid.PlatformStand = true
+
+	bodyVelocity = Instance.new("BodyVelocity")
+	bodyVelocity.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+	bodyVelocity.Velocity = Vector3.zero
+	bodyVelocity.Parent = root
+
+	bodyGyro = Instance.new("BodyGyro")
+	bodyGyro.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+	bodyGyro.P = 90000
+	bodyGyro.CFrame = workspace.CurrentCamera.CFrame
+	bodyGyro.Parent = root
+
+	flyConnection = RunService.RenderStepped:Connect(function()
+		if not flying or not root.Parent then
+			stopFly()
+			return
+		end
+		local move = getMoveDirection()
+		bodyVelocity.Velocity = move.Magnitude > 0 and move.Unit * flySpeed or Vector3.zero
+		bodyGyro.CFrame = workspace.CurrentCamera.CFrame
+	end)
+end
+
+---------------------------------------------------------------------
+-- NOCLIP
+---------------------------------------------------------------------
+local function restoreCollisions()
+	for part, value in pairs(originalCollide) do
+		if part and part.Parent then
+			part.CanCollide = value
+		end
+	end
+	originalCollide = {}
+end
+
+setNoclip = function(state)
+	noclip = state
+	noclipToggle.Set(state, true)
+
+	if noclipConnection then
+		noclipConnection:Disconnect()
+		noclipConnection = nil
+	end
+
+	if noclip then
+		noclipConnection = RunService.Stepped:Connect(function()
+			local character = Player.Character
+			if not character then return end
+			for _, part in ipairs(character:GetDescendants()) do
+				if part:IsA("BasePart") then
+					if originalCollide[part] == nil then
+						originalCollide[part] = part.CanCollide
+					end
+					part.CanCollide = false
+				end
+			end
+		end)
+	else
+		restoreCollisions()
+	end
+end
+
+---------------------------------------------------------------------
+-- TOUCHES + RESPAWN
+---------------------------------------------------------------------
+addConn(UserInputService.InputBegan:Connect(function(input, processed)
+	if processed then return end
+
+	if input.KeyCode == Enum.KeyCode.F then
+		flyToggle.Set(not flyToggle.Get())
+	elseif input.KeyCode == Enum.KeyCode.N then
+		noclipToggle.Set(not noclipToggle.Get())
+	elseif input.KeyCode == Enum.KeyCode.M then
+		setMenuVisible(not Frame.Visible)
+	end
+end))
+
+addConn(Player.CharacterAdded:Connect(function()
+	stopFly()
+	originalCollide = {}
+	setNoclip(false)
+end))
+
+---------------------------------------------------------------------
+-- NETTOYAGE (si le script est relancé)
+---------------------------------------------------------------------
+_G.TiveauFlyUnload = function()
+	stopFly()
+	setNoclip(false)
+	for _, c in ipairs(connections) do
+		pcall(function() c:Disconnect() end)
+	end
+	if Gui then Gui:Destroy() end
+	_G.TiveauFlyUnload = nil
+end
+
+print("TIVEAU FLY + NOCLIP chargé !")
